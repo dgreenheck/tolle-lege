@@ -55,8 +55,31 @@ await sleep(200);
 await send('Page.navigate', { url });
 await sleep(parseInt(waitMs, 10));
 
-for (const click of clicks) {
-  const [cx, cy, after = '2500'] = click.split(',');
+for (const action of clicks) {
+  // "eval:expr" — run an expression in the page, then settle.
+  if (action.startsWith('eval:')) {
+    await send('Runtime.evaluate', { expression: action.slice(5) });
+    await sleep(2000);
+    continue;
+  }
+  // "drag:x1,y1,x2,y2[,afterWaitMs]" — press, sweep in steps, release.
+  if (action.startsWith('drag:')) {
+    const [x1, y1, x2, y2, after = '2500'] = action.slice(5).split(',').map(Number);
+    await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: x1, y: y1, button: 'left', clickCount: 1 });
+    for (let i = 1; i <= 12; i++) {
+      await send('Input.dispatchMouseEvent', {
+        type: 'mouseMoved',
+        x: x1 + ((x2 - x1) * i) / 12,
+        y: y1 + ((y2 - y1) * i) / 12,
+        button: 'left', buttons: 1,
+      });
+      await sleep(40);
+    }
+    await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: x2, y: y2, button: 'left', clickCount: 1 });
+    await sleep(after);
+    continue;
+  }
+  const [cx, cy, after = '2500'] = action.split(',');
   const x = parseInt(cx, 10), y = parseInt(cy, 10);
   for (const type of ['mousePressed', 'mouseReleased']) {
     await send('Input.dispatchMouseEvent', { type, x, y, button: 'left', clickCount: 1 });

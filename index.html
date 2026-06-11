@@ -3,30 +3,88 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Verbum — 3D Bible Explorer</title>
+  <title>Tolle Lege — 3D Bible Study</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=EB+Garamond:ital,wght@0,400;0,500;0,600;1,400&family=Cormorant+SC:wght@500;600&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="/src/style.css" />
 </head>
 <body>
-  <canvas id="gl"></canvas>
+  <div id="app">
+    <header id="nav">
+      <h1 id="title">Tolle Lege</h1>
+      <div id="history-controls">
+        <button id="hist-back" class="nav-arrow" title="Back" aria-label="Back" disabled>&#8617;</button>
+        <button id="hist-fwd" class="nav-arrow" title="Forward" aria-label="Forward" disabled>&#8618;</button>
+      </div>
+      <div id="nav-controls">
+        <button id="prev-ch" class="nav-arrow" title="Previous chapter" aria-label="Previous chapter">&#8249;</button>
+        <select id="book-select" aria-label="Book"></select>
+        <select id="chapter-select" aria-label="Chapter"></select>
+        <button id="next-ch" class="nav-arrow" title="Next chapter" aria-label="Next chapter">&#8250;</button>
+      </div>
+      <button id="about-btn" class="nav-arrow" title="About &amp; attributions" aria-label="About and attributions">&#8505;</button>
+    </header>
 
-  <header id="nav">
-    <h1 id="title">Verbum</h1>
-    <div id="history-controls">
-      <button id="hist-back" class="nav-arrow" title="Back" aria-label="Back" disabled>&#8617;</button>
-      <button id="hist-fwd" class="nav-arrow" title="Forward" aria-label="Forward" disabled>&#8618;</button>
-    </div>
-    <div id="nav-controls">
-      <button id="prev-ch" class="nav-arrow" title="Previous chapter" aria-label="Previous chapter">&#8249;</button>
-      <select id="book-select" aria-label="Book"></select>
-      <select id="chapter-select" aria-label="Chapter"></select>
-      <button id="next-ch" class="nav-arrow" title="Next chapter" aria-label="Next chapter">&#8250;</button>
-    </div>
-  </header>
+    <main id="stage">
+      <canvas id="gl"></canvas>
+      <footer id="hint"></footer>
 
-  <footer id="hint">Click any word to reveal the Scriptures it is bound to &middot; click a card to follow the thread &middot; &#8617; returns to your place &middot; &#8592;&#8594; turn the pages</footer>
+      <div id="word-pop" class="glass-card" hidden></div>
+    </main>
+
+    <div id="side">
+      <aside id="study" class="glass-card" aria-label="Study panel">
+        <header id="study-head">
+          <span id="study-label">Study</span>
+        </header>
+        <div id="study-body"></div>
+      </aside>
+      <aside id="map-card" class="glass-card" aria-label="Places map" hidden>
+        <header id="map-head">
+          <span class="sec-title">Places</span>
+          <button id="map-expand" class="sec-tool" title="Expand map" aria-label="Expand map">&#10530;</button>
+        </header>
+        <div id="map-body"></div>
+      </aside>
+    </div>
+  </div>
+
+  <div id="map-overlay" hidden>
+    <div id="map-overlay-frame">
+      <button id="map-overlay-close" class="nav-arrow" title="Close map" aria-label="Close map">&#10005;</button>
+    </div>
+  </div>
+
+  <dialog id="about">
+    <h2>Tolle Lege</h2>
+    <p class="about-tagline">“Take up and read” — a 3D Bible study tool.</p>
+    <p>Click any word to study the Greek or Hebrew behind it. Drag across
+      words to select a passage. Click a rubric verse number for its
+      cross-references. Place names are inked in lapis blue — click one to
+      see it on the map. The reference rows in the study panel turn the
+      book's pages to that passage.</p>
+    <h3>Texts &amp; data</h3>
+    <ul>
+      <li>Scripture text and word-level Greek/Hebrew alignment:
+        <a href="https://berean.bible" target="_blank" rel="noopener">Berean Standard Bible</a>,
+        dedicated to the public domain.</li>
+      <li>Strong's Hebrew and Greek dictionaries:
+        <a href="https://github.com/openscriptures/strongs" target="_blank" rel="noopener">Open Scriptures</a>
+        (CC&nbsp;BY-SA&nbsp;4.0).</li>
+      <li>Cross-references:
+        <a href="https://www.openbible.info/labs/cross-references/" target="_blank" rel="noopener">OpenBible.info</a>
+        (CC&nbsp;BY), derived from the Treasury of Scripture Knowledge.</li>
+      <li>Place locations:
+        <a href="https://www.openbible.info/geo/" target="_blank" rel="noopener">OpenBible.info Bible Geocoding</a>
+        (CC&nbsp;BY&nbsp;4.0).</li>
+      <li>Maps rendered with <a href="https://leafletjs.com" target="_blank" rel="noopener">Leaflet</a>;
+        imagery tiles &copy; <a href="https://www.esri.com" target="_blank" rel="noopener">Esri</a>
+        — Esri, Maxar, Earthstar Geographics.</li>
+      <li>Rendered with <a href="https://threejs.org" target="_blank" rel="noopener">Three.js</a> (WebGPU).</li>
+    </ul>
+    <button id="about-close" class="nav-arrow" title="Close" aria-label="Close">&#10005;</button>
+  </dialog>
 
   <script type="module" src="/src/main.js"></script>
 </body>

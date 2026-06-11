@@ -28,6 +28,7 @@ export const PAGE = {
 const INK = '#2e2316';
 const RUBRIC = '#9b3a20';
 const GOLD_BROWN = '#7c5a1e';
+const LAPIS = '#33567e'; // geocoded place names — the second rubric ink
 
 let mctx = null;
 function measurer() {
@@ -184,7 +185,7 @@ export function drawPage(page, { bookName, side, hasNext, hasPrev, folio = null 
         ctx.font = PAGE.vnumFont;
         ctx.fillText(t.str, t.x, t.y - 14);
       } else {
-        ctx.fillStyle = INK;
+        ctx.fillStyle = t.place ? LAPIS : INK;
         ctx.font = PAGE.font;
         ctx.fillText(t.str, t.x, t.y);
       }

@@ -7,7 +7,7 @@
 import * as THREE from 'three/webgpu';
 import { vec3, float, positionLocal, uniform, mix } from 'three/tsl';
 import { layoutBook, countBookPages, drawPage, PAGE } from './pages.js';
-import { loadBooks, loadBookText, bookInfo } from './data.js';
+import { loadBooks, loadBookText, loadBookGeo, bookInfo } from './data.js';
 
 export const PAGE_W = 5.25;
 export const PAGE_H = PAGE_W * (PAGE.H / PAGE.W); // ≈ 6.32
@@ -19,7 +19,7 @@ const CURVE_SEGS = 64;
 const TEX_CACHE_MAX = 16;
 const LAYOUT_CACHE_MAX = 8;
 // Bump the suffix whenever typesetting metrics change — cached counts go stale.
-const PAGECOUNT_STORE = 'verbum-pagecounts-v2';
+const PAGECOUNT_STORE = 'tollelege-pagecounts-v1';
 
 /**
  * Open-book cross-section. u: 0 at the spine -> 1 at the outer edge.
@@ -67,24 +67,51 @@ function hingedPlaneGeometry(bow = 0) {
   return geo;
 }
 
-/** The page block under the leaves: profile on top, flat bottom, extruded. */
+/**
+ * The page block under the leaves: profile on top, flat bottom, extruded.
+ * The gilt fore-edge swells outward past the open leaves — widest at
+ * mid-block, like a thick book's fanned pages — so the gold leaf shows on
+ * the sides of the open book.
+ */
+const EDGE_BULGE = 0.32;
+
 function pageStackGeometry() {
   const shape = new THREE.Shape();
+  const top = pageProfile(1) - 0.02;
+  const bottom = -0.5;
   shape.moveTo(0, pageProfile(0) - 0.02);
   for (let i = 1; i <= 40; i++) {
     const u = i / 40;
     shape.lineTo(u * PAGE_W, pageProfile(u) - 0.02);
   }
-  shape.lineTo(PAGE_W, -0.5);
-  shape.lineTo(0, -0.5);
+  shape.quadraticCurveTo(
+    PAGE_W + EDGE_BULGE * 1.8, (top + bottom) / 2,
+    PAGE_W + EDGE_BULGE * 0.4, bottom,
+  );
+  shape.lineTo(0, bottom);
   shape.closePath();
   return new THREE.ExtrudeGeometry(shape, { depth: PAGE_H, bevelEnabled: false });
 }
 
+/** Tag word tokens that carry a geocoded place (drawn in lapis ink). */
+function markPlaceTokens(pages, geo) {
+  for (const page of pages) {
+    for (const t of page.tokens) {
+      if (t.type !== 'word') continue;
+      const entries = geo[`${t.chapter}.${t.verse}`];
+      if (!entries) continue;
+      for (const [start, len] of entries) {
+        if (start >= 0 && t.word >= start && t.word < start + len) { t.place = true; break; }
+      }
+    }
+  }
+}
+
 export class Book3D {
-  constructor(scene3d, { onSelect, onClear, onPageChange } = {}) {
+  constructor(scene3d, { onSelect, onSelectRange, onClear, onPageChange } = {}) {
     this.s3d = scene3d;
     this.onSelect = onSelect;
+    this.onSelectRange = onSelectRange;
     this.onClear = onClear;
     this.onPageChange = onPageChange;
 
@@ -103,11 +130,12 @@ export class Book3D {
     this.pageCounts = null;
     this.flashQuads = [];
     this.flashLife = 0;
+    this.rangeQuads = [];
     this.warmupFrames = 3;         // precompile flip pipelines at boot
 
     this.group = new THREE.Group();
     this.group.rotation.x = -0.18;
-    this.group.position.y = 0.15;
+    this.group.position.y = 0.22; // ride a touch high in the frame
     scene3d.scene.add(this.group);
     this.#buildBody();
     this.#buildFlipRig();
@@ -120,10 +148,14 @@ export class Book3D {
   #buildBody() {
     const leather = new THREE.MeshBasicNodeMaterial({ color: 0x332012 });
     const leatherDark = new THREE.MeshBasicNodeMaterial({ color: 0x241509 });
-    const paperEdge = new THREE.MeshBasicNodeMaterial({ color: 0xcdbb92, side: THREE.DoubleSide });
+    // Gilt fore-edges: the page block reads as gold leaf, with faint
+    // lamination lines so the swell reads as stacked pages.
+    const paperEdge = new THREE.MeshBasicNodeMaterial({ side: THREE.DoubleSide });
+    const lam = positionLocal.y.mul(150).sin().mul(0.5).add(0.5);
+    paperEdge.colorNode = mix(vec3(0.62, 0.47, 0.17), vec3(0.85, 0.69, 0.31), lam);
 
     const cover = new THREE.Mesh(
-      new THREE.BoxGeometry(PAGE_W * 2 + 0.6, PAGE_H + 0.5, 0.16),
+      new THREE.BoxGeometry(PAGE_W * 2 + 0.8, PAGE_H + 0.5, 0.16),
       leather,
     );
     cover.position.z = -0.59;
@@ -157,6 +189,10 @@ export class Book3D {
       color: 0xd4af5a, transparent: true, opacity: 0.3,
       blending: THREE.AdditiveBlending, depthWrite: false,
     });
+    this.rangeMaterial = new THREE.MeshBasicNodeMaterial({
+      color: 0xd4af5a, transparent: true, opacity: 0.2,
+      blending: THREE.AdditiveBlending, depthWrite: false,
+    });
   }
 
   /**
@@ -176,8 +212,18 @@ export class Book3D {
       .add(float(0.105).mul(u.pow(0.85).mul(Math.PI).sin()).mul(float(1).sub(u.mul(0.25))))
       .sub(u.pow(3).mul(0.035));
     const p = this.flipProg;
-    const bend = u.mul(Math.PI).sin().mul(p.mul(Math.PI).sin()).mul(0.34);
-    const morphed = vec3(positionLocal.x, positionLocal.y, mix(prof, prof.negate(), p).add(bend));
+    // Paper curls hardest nearer the spine (u^0.7 skews the bow's peak
+    // inward) and most strongly at mid-turn.
+    const bend = u.pow(0.7).mul(Math.PI).sin().mul(p.mul(Math.PI).sin()).mul(0.58);
+    // The resting profiles dip into the binding valley at u=0; fade that
+    // dip out through the turn so the bound edge stays ON the hinge instead
+    // of swinging around it (which read as the page tearing out).
+    const settle = float(1).sub(p.mul(Math.PI).sin().mul(u.mul(-9).exp()));
+    const morphed = vec3(
+      positionLocal.x,
+      positionLocal.y,
+      mix(prof, prof.negate(), p).mul(settle).add(bend),
+    );
 
     this.flipBackCanvas = document.createElement('canvas');
     this.flipBackCanvas.width = PAGE.W;
@@ -236,8 +282,9 @@ export class Book3D {
 
   async ensureLayout(osis) {
     if (!this.layoutCache.has(osis)) {
-      const text = await loadBookText(osis);
+      const [text, geo] = await Promise.all([loadBookText(osis), loadBookGeo(osis)]);
       const pages = layoutBook(text);
+      markPlaceTokens(pages, geo);
       this.layoutCache.set(osis, pages);
       for (const k of this.layoutCache.keys()) {
         if (this.layoutCache.size <= LAYOUT_CACHE_MAX) break;
@@ -517,7 +564,8 @@ export class Book3D {
 
     if (!page) return { type: 'page' };
     const token = page.tokens.find(
-      (t) => t.type === 'word' && cx >= t.rx && cx <= t.rx + t.rw && cy >= t.ry && cy <= t.ry + t.rh,
+      (t) => (t.type === 'word' || t.type === 'vnum') &&
+        cx >= t.rx && cx <= t.rx + t.rw && cy >= t.ry && cy <= t.ry + t.rh,
     );
     if (token) return { type: 'word', token, page, pageIdx, mesh };
     return { type: 'page' };
@@ -549,17 +597,46 @@ export class Book3D {
     return p;
   }
 
+  /**
+   * The token's on-screen footprint: { left, x, y } in client px — left/right
+   * edges and vertical center, for anchoring the word popover beside it.
+   */
+  #tokenClientPos(mesh, token) {
+    const r = this.s3d.canvas.getBoundingClientRect();
+    const isLeft = mesh === this.leftMesh;
+    const cy = (0.5 - (token.ry + token.rh / 2) / PAGE.H) * PAGE_H;
+    mesh.updateWorldMatrix(true, false);
+    const project = (canvasX) => {
+      const cxn = canvasX / PAGE.W;
+      const u = isLeft ? 1 - cxn : cxn;
+      const p = new THREE.Vector3((cxn - 0.5) * PAGE_W, cy, pageProfile(u) + 0.02);
+      mesh.localToWorld(p).project(this.s3d.camera);
+      return { x: r.left + ((p.x + 1) / 2) * r.width, y: r.top + ((1 - p.y) / 2) * r.height };
+    };
+    const a = project(token.rx);
+    const b = project(token.rx + token.rw);
+    return { left: Math.min(a.x, b.x), x: Math.max(a.x, b.x), y: (a.y + b.y) / 2 };
+  }
+
   #select({ token, mesh }) {
     this.#clearFlash();
+    this.#clearRangeQuads();
     this.#placeQuad(this.selectQuad, mesh, token);
     this.selectQuad.visible = true;
     this.hoverQuad.visible = false;
-    this.selection = { chapter: token.chapter, verse: token.verse, word: token.word };
+    // word: -1 records a verse-number selection (cross-reference view).
+    this.selection = {
+      chapter: token.chapter,
+      verse: token.verse,
+      word: token.type === 'vnum' ? -1 : token.word,
+    };
     this.onSelect?.({
       osis: this.osis,
       chapter: token.chapter,
       verse: token.verse,
       word: token.str,
+      wordIdx: token.type === 'vnum' ? null : token.word,
+      at: this.#tokenClientPos(mesh, token),
     });
   }
 
@@ -573,26 +650,51 @@ export class Book3D {
     const targetSpread = Math.floor(pageIdx / 2);
     if (targetSpread !== this.spread) this.setSpread(targetSpread);
     const page = pages[pageIdx];
+    const inVerse = (t) => t.chapter === chapter && t.verse === verse;
     const token =
-      page.tokens.find((t) => t.type === 'word' && t.chapter === chapter && t.verse === verse && t.word === wordIdx) ??
-      page.tokens.find((t) => t.type === 'word' && t.chapter === chapter && t.verse === verse);
+      (wordIdx === -1
+        ? page.tokens.find((t) => t.type === 'vnum' && inVerse(t))
+        : page.tokens.find((t) => t.type === 'word' && inVerse(t) && t.word === wordIdx)) ??
+      page.tokens.find((t) => t.type === 'word' && inVerse(t));
     if (!token) return false;
     const mesh = pageIdx % 2 === 0 ? this.leftMesh : this.rightMesh;
     this.#select({ token, mesh });
     return true;
   }
 
+  /**
+   * Passage selection: verses (c0,v0)..(c1,v1) inclusive, either direction.
+   * fire=false updates the highlight only (live preview while dragging);
+   * fire=true also commits the selection and notifies onSelectRange.
+   */
+  selectRange(c0, v0, c1, v1, fire = true) {
+    if (c0 > c1 || (c0 === c1 && v0 > v1)) [c0, v0, c1, v1] = [c1, v1, c0, v0];
+    this.#clearFlash();
+    this.#clearRangeQuads();
+    this.selectQuad.visible = false;
+    this.selectQuad.removeFromParent();
+    this.hoverQuad.visible = false;
+    const after = (t) => t.chapter > c0 || (t.chapter === c0 && t.verse >= v0);
+    const before = (t) => t.chapter < c1 || (t.chapter === c1 && t.verse <= v1);
+    this.rangeQuads = this.#lineQuads((t) => after(t) && before(t), this.rangeMaterial);
+    if (fire) {
+      this.selection = { range: { c0, v0, c1, v1 } };
+      this.onSelectRange?.({ osis: this.osis, c0, v0, c1, v1 });
+    }
+  }
+
+  #clearRangeQuads() {
+    for (const q of this.rangeQuads) { q.removeFromParent(); q.geometry.dispose(); }
+    this.rangeQuads = [];
+  }
+
   clearSelection() {
+    this.#clearRangeQuads();
     if (!this.selection) return;
     this.selection = null;
     this.selectQuad.visible = false;
     this.selectQuad.removeFromParent();
     this.onClear?.();
-  }
-
-  anchorWorld() {
-    if (!this.selection || !this.selectQuad.visible) return null;
-    return this.selectQuad.getWorldPosition(new THREE.Vector3());
   }
 
   current() {
@@ -621,10 +723,11 @@ export class Book3D {
     quad.scale.set((token.rw / PAGE.W) * PAGE_W, (token.rh / PAGE.H) * PAGE_H, 1);
   }
 
-  /* ---------- verse flash ---------- */
+  /* ---------- verse highlights (flash + passage range) ---------- */
 
-  #flashVerse(chapter, verse) {
-    this.#clearFlash();
+  /** One quad per typeset line whose tokens satisfy the predicate. */
+  #lineQuads(predicate, material) {
+    const quads = [];
     for (const pageIdx of [2 * this.spread, 2 * this.spread + 1]) {
       const page = this.pages[pageIdx];
       if (!page) continue;
@@ -632,14 +735,14 @@ export class Book3D {
       const isLeft = pageIdx % 2 === 0;
       const lines = new Map();
       for (const t of page.tokens) {
-        if (t.chapter !== chapter || t.verse !== verse) continue;
+        if (!predicate(t)) continue;
         const line = lines.get(t.y) ?? { x0: t.rx, x1: t.rx + t.rw, y: t.ry, h: t.rh };
         line.x0 = Math.min(line.x0, t.rx);
         line.x1 = Math.max(line.x1, t.rx + t.rw);
         lines.set(t.y, line);
       }
       for (const l of lines.values()) {
-        const quad = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), this.flashMaterial);
+        const quad = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), material);
         const cxn = (l.x0 + l.x1) / 2 / PAGE.W;
         const u = isLeft ? 1 - cxn : cxn;
         const m = (profileSlope(u) * (isLeft ? -1 : 1)) / PAGE_W;
@@ -652,9 +755,18 @@ export class Book3D {
         quad.scale.set(((l.x1 - l.x0) / PAGE.W) * PAGE_W, (l.h / PAGE.H) * PAGE_H, 1);
         quad.renderOrder = 2;
         mesh.add(quad);
-        this.flashQuads.push(quad);
+        quads.push(quad);
       }
     }
+    return quads;
+  }
+
+  #flashVerse(chapter, verse) {
+    this.#clearFlash();
+    this.flashQuads = this.#lineQuads(
+      (t) => t.chapter === chapter && t.verse === verse,
+      this.flashMaterial,
+    );
     this.flashLife = 2.4;
   }
 
@@ -667,10 +779,6 @@ export class Book3D {
   /* ---------- per-frame ---------- */
 
   #tick(dt) {
-    const t = performance.now() / 1000;
-    this.group.position.y = 0.15 + Math.sin(t * 0.6) * 0.05;
-    this.group.rotation.y = Math.sin(t * 0.23) * 0.012;
-
     // Warm GPU pipelines for the flip rig at boot (degenerate scale, 3 frames)
     // so the first real page turn doesn't hitch on shader compilation.
     if (this.warmupFrames > 0 && !this.flip) {

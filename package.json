@@ -10,8 +10,9 @@
   "keywords": [],
   "author": "",
   "license": "ISC",
-  "description": "Verbum — a 3D Bible explorer. Click a word, follow the threads of Scripture.",
+  "description": "Tolle Lege — a 3D Bible study tool. Take up and read; click a word to study the Scriptures.",
   "dependencies": {
+    "leaflet": "^1.9.4",
     "three": "^0.184.0",
     "vite": "^8.0.16"
   },
