@@ -5,13 +5,11 @@
  * target, and folio numbers are absolute through the whole Bible.
  */
 import * as THREE from 'three/webgpu';
-import {
-  texture, uv, vec2, vec3, float, select, frontFacing, positionLocal, uniform, mix,
-} from 'three/tsl';
+import { vec3, float, positionLocal, uniform, mix } from 'three/tsl';
 import { layoutBook, countBookPages, drawPage, PAGE } from './pages.js';
 import { loadBooks, loadBookText, bookInfo } from './data.js';
 
-export const PAGE_W = 4.6;
+export const PAGE_W = 5.25;
 export const PAGE_H = PAGE_W * (PAGE.H / PAGE.W); // ≈ 6.32
 export const BOOK_HALF_W = PAGE_W + 0.18;
 
@@ -20,7 +18,8 @@ const RIFFLE_TIME = 0.3;
 const CURVE_SEGS = 64;
 const TEX_CACHE_MAX = 16;
 const LAYOUT_CACHE_MAX = 8;
-const PAGECOUNT_STORE = 'verbum-pagecounts-v1';
+// Bump the suffix whenever typesetting metrics change — cached counts go stale.
+const PAGECOUNT_STORE = 'verbum-pagecounts-v2';
 
 /**
  * Open-book cross-section. u: 0 at the spine -> 1 at the outer edge.
@@ -164,29 +163,40 @@ export class Book3D {
    * One persistent turning page. Its surface morphs in the vertex stage:
    * at progress 0 it matches the right page's curve, at 1 the (mirrored)
    * landing curve, bowing extra in between — paper bending as it turns.
-   * Front/back faces carry separate textures via a frontFacing select, so
-   * nothing is rebuilt per flip (no shader-compile flicker).
+   *
+   * Two coplanar single-sided meshes carry the two faces via plain `.map`
+   * (the same swap mechanism the page meshes use). The back page is drawn
+   * mirrored into a dedicated canvas, so viewed from behind it reads
+   * correctly. No per-flip shader work at all.
    */
   #buildFlipRig() {
     this.flipProg = uniform(0);
-    this.texFrontNode = texture(this.blankTex);
-    this.texBackNode = texture(this.blankTex, vec2(float(1).sub(uv().x), uv().y));
-
-    const mat = new THREE.MeshBasicNodeMaterial({ side: THREE.DoubleSide });
-    mat.colorNode = select(frontFacing, this.texFrontNode, this.texBackNode);
-
     const u = positionLocal.x.div(PAGE_W).clamp(0, 1);
     const prof = float(-0.30).mul(u.mul(-9).exp())
       .add(float(0.105).mul(u.pow(0.85).mul(Math.PI).sin()).mul(float(1).sub(u.mul(0.25))))
       .sub(u.pow(3).mul(0.035));
     const p = this.flipProg;
     const bend = u.mul(Math.PI).sin().mul(p.mul(Math.PI).sin()).mul(0.34);
-    mat.positionNode = vec3(positionLocal.x, positionLocal.y, mix(prof, prof.negate(), p).add(bend));
+    const morphed = vec3(positionLocal.x, positionLocal.y, mix(prof, prof.negate(), p).add(bend));
 
-    this.flipMesh = new THREE.Mesh(hingedPlaneGeometry(0), mat);
-    this.flipMesh.position.z = 0.03;
-    this.flipMesh.visible = false;
-    this.group.add(this.flipMesh);
+    this.flipBackCanvas = document.createElement('canvas');
+    this.flipBackCanvas.width = PAGE.W;
+    this.flipBackCanvas.height = PAGE.H;
+    this.flipBackTex = new THREE.CanvasTexture(this.flipBackCanvas);
+    this.flipBackTex.colorSpace = THREE.SRGBColorSpace;
+    this.flipBackTex.anisotropy = 8;
+
+    this.flipFrontMat = new THREE.MeshBasicNodeMaterial({ map: this.blankTex, side: THREE.FrontSide });
+    this.flipFrontMat.positionNode = morphed;
+    const backMat = new THREE.MeshBasicNodeMaterial({ map: this.flipBackTex, side: THREE.BackSide });
+    backMat.positionNode = morphed;
+
+    const geo = hingedPlaneGeometry(0);
+    this.flipPivot = new THREE.Group();
+    this.flipPivot.position.z = 0.03;
+    this.flipPivot.visible = false;
+    this.flipPivot.add(new THREE.Mesh(geo, this.flipFrontMat), new THREE.Mesh(geo, backMat));
+    this.group.add(this.flipPivot);
   }
 
   #pageMaterial() {
@@ -450,21 +460,26 @@ export class Book3D {
         frontTex = this.pageTexture(osisIn, 2 * spreadIn + 1);   // lands as new right
         this.leftMesh.material.map = this.pageTexture(osisIn, 2 * spreadIn);
       }
-      this.lockedTex.add(frontTex).add(backTex);
-      this.texFrontNode.value = frontTex;
-      this.texBackNode.value = backTex;
-      this.flipMesh.material.needsUpdate = true;
+      this.lockedTex.add(frontTex);
+      this.flipFrontMat.map = frontTex;
+      // Draw the incoming page mirrored; the BackSide mesh un-mirrors it.
+      const ctx = this.flipBackCanvas.getContext('2d');
+      ctx.save();
+      ctx.scale(-1, 1);
+      ctx.drawImage(backTex.image, -PAGE.W, 0);
+      ctx.restore();
+      this.flipBackTex.needsUpdate = true;
 
       const from = dir > 0 ? 0 : -Math.PI;
       const to = dir > 0 ? -Math.PI : 0;
-      this.flipMesh.rotation.y = from;
+      this.flipPivot.rotation.y = from;
       this.flipProg.value = -from / Math.PI;
-      this.flipMesh.visible = true;
+      this.flipPivot.visible = true;
 
       this.flip = {
         from, to, t: 0, duration,
         finish: (complete) => {
-          this.flipMesh.visible = false;
+          this.flipPivot.visible = false;
           this.lockedTex.clear();
           this.flip = null;
           if (complete) {
@@ -659,11 +674,11 @@ export class Book3D {
     // Warm GPU pipelines for the flip rig at boot (degenerate scale, 3 frames)
     // so the first real page turn doesn't hitch on shader compilation.
     if (this.warmupFrames > 0 && !this.flip) {
-      this.flipMesh.visible = true;
-      this.flipMesh.scale.setScalar(0.0001);
+      this.flipPivot.visible = true;
+      this.flipPivot.scale.setScalar(0.0001);
       if (--this.warmupFrames === 0) {
-        this.flipMesh.visible = false;
-        this.flipMesh.scale.setScalar(1);
+        this.flipPivot.visible = false;
+        this.flipPivot.scale.setScalar(1);
       }
     }
 
@@ -672,7 +687,7 @@ export class Book3D {
       f.t = Math.min(f.t + dt / f.duration, 1);
       const e = f.t < 0.5 ? 2 * f.t * f.t : 1 - (-2 * f.t + 2) ** 2 / 2;
       const rot = f.from + (f.to - f.from) * e;
-      this.flipMesh.rotation.y = rot;
+      this.flipPivot.rotation.y = rot;
       this.flipProg.value = -rot / Math.PI;
       if (f.t >= 1) f.finish(true);
     }
