@@ -1,8 +1,8 @@
 /**
  * The 3D book: an open codex with curved pages whose surfaces are
  * canvas-typeset textures. One continuous volume — page flips run through
- * chapter and book boundaries, navigation riffles the true number of pages,
- * and folio numbers are absolute through the whole Bible.
+ * chapter and book boundaries, navigation turns a few quick pages to its
+ * target, and folio numbers are absolute through the whole Bible.
  */
 import * as THREE from 'three/webgpu';
 import {
@@ -20,7 +20,6 @@ const RIFFLE_TIME = 0.3;
 const CURVE_SEGS = 64;
 const TEX_CACHE_MAX = 16;
 const LAYOUT_CACHE_MAX = 8;
-const CASCADE_FLIP_TIME = 0.32;
 const PAGECOUNT_STORE = 'verbum-pagecounts-v1';
 
 /**
@@ -83,25 +82,6 @@ function pageStackGeometry() {
   return new THREE.ExtrudeGeometry(shape, { depth: PAGE_H, bevelEnabled: false });
 }
 
-/** Unreadable "mid-riffle" page texture: parchment with ghosted text lines. */
-function riffleCanvas() {
-  const cv = document.createElement('canvas');
-  cv.width = 512;
-  cv.height = 704;
-  const ctx = cv.getContext('2d');
-  const bg = ctx.createLinearGradient(0, 0, 0, 704);
-  bg.addColorStop(0, '#f4ebd7');
-  bg.addColorStop(1, '#e9dbbc');
-  ctx.fillStyle = bg;
-  ctx.fillRect(0, 0, 512, 704);
-  ctx.fillStyle = 'rgba(70, 55, 35, 0.22)';
-  for (let y = 70; y < 640; y += 29) {
-    const w = 380 + Math.random() * 60;
-    ctx.fillRect(48 + Math.random() * 8, y, w, 11);
-  }
-  return cv;
-}
-
 export class Book3D {
   constructor(scene3d, { onSelect, onClear, onPageChange } = {}) {
     this.s3d = scene3d;
@@ -114,7 +94,6 @@ export class Book3D {
     this.spread = 0;
     this.selection = null;
     this.flip = null;
-    this.cascade = null;
     this.navToken = 0;
 
     this.order = [];               // canon order of osis ids
@@ -166,7 +145,6 @@ export class Book3D {
     this.group.add(stackR, stackL);
 
     this.blankTex = this.#makeTexture(drawPage(null, { bookName: '', side: 'left' }));
-    this.riffleTex = this.#makeTexture(riffleCanvas());
 
     this.leftMesh = new THREE.Mesh(curvedPageGeometry(-1), this.#pageMaterial());
     this.leftMesh.position.set(-PAGE_W / 2 - 0.02, 0, 0.012);
@@ -209,11 +187,6 @@ export class Book3D {
     this.flipMesh.position.z = 0.03;
     this.flipMesh.visible = false;
     this.group.add(this.flipMesh);
-
-    // Pool of lightweight riffle pages for long cascades.
-    this.cascadeGeo = hingedPlaneGeometry(0.09);
-    this.cascadeMat = new THREE.MeshBasicNodeMaterial({ map: this.riffleTex, side: THREE.DoubleSide });
-    this.cascadePool = [];
   }
 
   #pageMaterial() {
@@ -376,7 +349,6 @@ export class Book3D {
     const token = ++this.navToken;
     this.clearSelection();
     this.#clearFlash();
-    this.#cancelCascade();
     this.#cancelFlip();
     await this.ensureLayout(osis);
     if (token !== this.navToken) return;
@@ -408,17 +380,7 @@ export class Book3D {
     this.onPageChange?.();
   }
 
-  /** Distance to a target in physical spreads (whole-volume). */
-  #spreadDistance(osis, target) {
-    if (osis === this.osis) return Math.abs(target - this.spread);
-    const a = this.pageOffsets?.get(this.osis);
-    const b = this.pageOffsets?.get(osis);
-    if (a == null || b == null) return 30; // offsets still computing
-    return Math.max(1, Math.round(Math.abs((b + 2 * target) - (a + 2 * this.spread)) / 2));
-  }
-
-  /** Turn the true number of pages: sequential turns when near, a cascading
-   *  riffle of the real page count when far. */
+  /** A few quick page turns toward the target, then land on it. */
   async #flipToward(osis, target, token) {
     let dir;
     if (osis === this.osis) {
@@ -427,25 +389,27 @@ export class Book3D {
     } else {
       dir = Math.sign(this.order.indexOf(osis) - this.order.indexOf(this.osis)) || 1;
     }
-    const count = this.#spreadDistance(osis, target);
 
-    if (osis === this.osis && count <= 6) {
-      for (let s = this.spread + dir; ; s += dir) {
-        if (token !== this.navToken) return;
-        await this.#animateFlip(dir, osis, s, s === target ? FLIP_TIME * 0.8 : RIFFLE_TIME);
-        if (s === target) break;
+    const hops = [];
+    if (osis === this.osis && Math.abs(target - this.spread) <= 4) {
+      for (let s = this.spread + dir; s !== target + dir; s += dir) hops.push(s);
+    } else {
+      const span = this.totalSpreads(osis);
+      for (const d of [3, 2, 1, 0]) {
+        const s = Math.min(Math.max(target - d * dir, 0), span - 1);
+        if (!hops.includes(s)) hops.push(s);
       }
-      return;
     }
-    if (count > 2) {
-      await this.#cascadeRiffle(dir, count - 1);
+
+    for (let i = 0; i < hops.length; i++) {
       if (token !== this.navToken) return;
+      const last = i === hops.length - 1;
+      await this.#animateFlip(dir, osis, hops[i], last ? FLIP_TIME * 0.8 : RIFFLE_TIME);
     }
-    await this.#animateFlip(dir, osis, target, FLIP_TIME * 0.85);
   }
 
   async flipPage(dir) {
-    if (this.flip || this.cascade || !this.osis) return false;
+    if (this.flip || !this.osis) return false;
     const nextSpread = this.spread + dir;
     if ((dir > 0 && 2 * this.spread + 2 < this.pages.length) || (dir < 0 && this.spread > 0)) {
       await this.#animateFlip(dir, this.osis, nextSpread, FLIP_TIME);
@@ -454,14 +418,14 @@ export class Book3D {
     const nb = this.neighborBook(this.osis, dir);
     if (!nb) return false;
     await this.ensureLayout(nb);
-    if (this.flip || this.cascade) return false;
+    if (this.flip) return false;
     const s = dir > 0 ? 0 : this.totalSpreads(nb) - 1;
     await this.#animateFlip(dir, nb, s, FLIP_TIME);
     return true;
   }
 
   canFlip(dir) {
-    if (this.flip || this.cascade) return false;
+    if (this.flip) return false;
     if (dir > 0) {
       return 2 * this.spread + 2 < this.pages.length || !!this.neighborBook(this.osis, 1);
     }
@@ -489,6 +453,7 @@ export class Book3D {
       this.lockedTex.add(frontTex).add(backTex);
       this.texFrontNode.value = frontTex;
       this.texBackNode.value = backTex;
+      this.flipMesh.material.needsUpdate = true;
 
       const from = dir > 0 ? 0 : -Math.PI;
       const to = dir > 0 ? -Math.PI : 0;
@@ -516,43 +481,7 @@ export class Book3D {
     this.flip?.finish(false);
   }
 
-  /** A storm of riffle pages — one per physical page turned, capped only by
-   *  launch rate; total time scales gently with distance. */
-  #cascadeRiffle(dir, count) {
-    return new Promise((resolve) => {
-      if (this.cascade) { resolve(); return; }
-      this.clearSelection();
-      this.#clearFlash();
 
-      // Per-page turn speeds up with distance; launch rate is bounded by a
-      // concurrency cap so even Genesis->Revelation lands in a few seconds.
-      const flipTime = count > 400 ? 0.16 : CASCADE_FLIP_TIME;
-      const total = Math.min(3.4, Math.max(0.7, 0.45 + count * 0.02));
-      const stagger = Math.max((total - flipTime) / count, flipTime / 80);
-      // Underlying page goes generic while pages storm across.
-      if (dir > 0) this.rightMesh.material.map = this.riffleTex;
-      else this.leftMesh.material.map = this.riffleTex;
-
-      this.cascade = {
-        dir, count, stagger, flipTime, launched: 0, sinceLaunch: stagger, active: [], resolve,
-      };
-    });
-  }
-
-  #cascadeMesh() {
-    const m = this.cascadePool.pop() ?? new THREE.Mesh(this.cascadeGeo, this.cascadeMat);
-    if (!m.parent) this.group.add(m);
-    m.visible = true;
-    return m;
-  }
-
-  #cancelCascade() {
-    const c = this.cascade;
-    if (!c) return;
-    for (const a of c.active) { a.mesh.visible = false; this.cascadePool.push(a.mesh); }
-    this.cascade = null;
-    c.resolve();
-  }
 
   /* ---------- picking ---------- */
 
@@ -580,7 +509,7 @@ export class Book3D {
   }
 
   hover(clientX, clientY) {
-    if (this.flip || this.cascade) return false;
+    if (this.flip) return false;
     const p = this.pick(clientX, clientY);
     if (p?.type === 'word') {
       this.#placeQuad(this.hoverQuad, p.mesh, p.token);
@@ -592,7 +521,7 @@ export class Book3D {
   }
 
   handleClick(clientX, clientY) {
-    if (this.flip || this.cascade) return null;
+    if (this.flip) return null;
     const p = this.pick(clientX, clientY);
     if (p?.type === 'flip') {
       this.flipPage(p.dir);
@@ -732,14 +661,9 @@ export class Book3D {
     if (this.warmupFrames > 0 && !this.flip) {
       this.flipMesh.visible = true;
       this.flipMesh.scale.setScalar(0.0001);
-      const c = this.#cascadeMesh();
-      c.scale.setScalar(0.0001);
       if (--this.warmupFrames === 0) {
         this.flipMesh.visible = false;
         this.flipMesh.scale.setScalar(1);
-        c.visible = false;
-        c.scale.setScalar(1);
-        this.cascadePool.push(c);
       }
     }
 
@@ -751,35 +675,6 @@ export class Book3D {
       this.flipMesh.rotation.y = rot;
       this.flipProg.value = -rot / Math.PI;
       if (f.t >= 1) f.finish(true);
-    }
-
-    if (this.cascade) {
-      const c = this.cascade;
-      c.sinceLaunch += dt;
-      while (c.launched < c.count && c.sinceLaunch >= c.stagger) {
-        c.sinceLaunch -= c.stagger;
-        const mesh = this.#cascadeMesh();
-        const from = c.dir > 0 ? 0 : -Math.PI;
-        mesh.rotation.y = from;
-        mesh.position.z = 0.03 + (c.launched % 5) * 0.004;
-        c.active.push({ mesh, t: 0, from, to: c.dir > 0 ? -Math.PI : 0 });
-        c.launched++;
-      }
-      for (let i = c.active.length - 1; i >= 0; i--) {
-        const a = c.active[i];
-        a.t = Math.min(a.t + dt / c.flipTime, 1);
-        const e = a.t < 0.5 ? 2 * a.t * a.t : 1 - (-2 * a.t + 2) ** 2 / 2;
-        a.mesh.rotation.y = a.from + (a.to - a.from) * e;
-        if (a.t >= 1) {
-          a.mesh.visible = false;
-          this.cascadePool.push(a.mesh);
-          c.active.splice(i, 1);
-        }
-      }
-      if (c.launched >= c.count && !c.active.length) {
-        this.cascade = null;
-        c.resolve();
-      }
     }
 
     if (this.flashLife > 0) {
