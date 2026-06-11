@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Verbum — 3D Bible Explorer</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=EB+Garamond:ital,wght@0,400;0,500;0,600;1,400&family=Cormorant+SC:wght@500;600&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/src/style.css" />
+</head>
+<body>
+  <canvas id="gl"></canvas>
+
+  <header id="nav">
+    <h1 id="title">Verbum</h1>
+    <div id="history-controls">
+      <button id="hist-back" class="nav-arrow" title="Back" aria-label="Back" disabled>&#8617;</button>
+      <button id="hist-fwd" class="nav-arrow" title="Forward" aria-label="Forward" disabled>&#8618;</button>
+    </div>
+    <div id="nav-controls">
+      <button id="prev-ch" class="nav-arrow" title="Previous chapter" aria-label="Previous chapter">&#8249;</button>
+      <select id="book-select" aria-label="Book"></select>
+      <select id="chapter-select" aria-label="Chapter"></select>
+      <button id="next-ch" class="nav-arrow" title="Next chapter" aria-label="Next chapter">&#8250;</button>
+    </div>
+  </header>
+
+  <footer id="hint">Click any word to reveal the Scriptures it is bound to &middot; click a card to follow the thread &middot; &#8617; returns to your place &middot; &#8592;&#8594; turn the pages</footer>
+
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>

@@ -1,0 +1,19 @@
+{
+  "name": "bible-explorer",
+  "version": "1.0.0",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "data": "node scripts/fetch-data.mjs"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "Verbum — a 3D Bible explorer. Click a word, follow the threads of Scripture.",
+  "dependencies": {
+    "three": "^0.184.0",
+    "vite": "^8.0.16"
+  },
+  "type": "module"
+}
